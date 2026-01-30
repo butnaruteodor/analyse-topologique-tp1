@@ -49,15 +49,13 @@ std::vector<ObjectType> getObjectsFromImage(const GrayImage& image)
         return {};
     }
 
-    // 2. Convert to Digital Set (Threshold 1-255)
+    Convert to Digital Set (Threshold 1-255)
     Z2i::DigitalSet set2d(image.domain());
     SetFromImage<Z2i::DigitalSet>::append<GrayImage>(set2d, image, 1, 255);
 
-    // 3. Create the Main Object (Topological Wrapper)
     // dt4_8 = 4-connected foreground, 8-connected background
     ObjectType obj(Z2i::dt4_8, set2d);
 
-    // 4. Extract Connected Components
     std::vector<ObjectType> objects;
     std::back_insert_iterator<std::vector<ObjectType>> inserter(objects);
     
@@ -67,6 +65,59 @@ std::vector<ObjectType> getObjectsFromImage(const GrayImage& image)
     std::cout << "Found " << objects.size() << " objects." << std::endl;
 
     return objects;
+}
+
+bool checkWellComposed(const GrayImage& image)
+{
+    Domain dom = image.domain();
+    Point pMin = dom.lowerBound();
+    Point pMax = dom.upperBound();
+
+    bool isWellComposed = true;
+    int badConfigs = 0;
+
+    std::cout << "Verifying Well-Composedness..." << std::endl;
+
+    // Iterate up to Width-1 and Height-1 because we check 2x2 blocks
+    for (int y = pMin[1]; y < pMax[1]; ++y) {
+        for (int x = pMin[0]; x < pMax[0]; ++x) {
+            
+            // Get the 4 pixels in the current 2x2 block
+
+            unsigned char A = image(Point(x, y));
+            unsigned char B = image(Point(x + 1, y));
+            unsigned char C = image(Point(x, y + 1));
+            unsigned char D = image(Point(x + 1, y + 1));
+
+            // Convert to binary (0 or 1)
+            int vA = (A > 0) ? 1 : 0;
+            int vB = (B > 0) ? 1 : 0;
+            int vC = (C > 0) ? 1 : 0;
+            int vD = (D > 0) ? 1 : 0;
+
+            // Check for Checkerboard Patterns
+            // Case 1:  1 0   Case 2:  0 1
+            //          0 1            1 0
+            if ((vA == 1 && vD == 1 && vB == 0 && vC == 0) || 
+                (vA == 0 && vD == 0 && vB == 1 && vC == 1)) 
+            {
+                isWellComposed = false;
+                badConfigs++;
+                
+                if (badConfigs <= 5) {
+                    std::cout << "  [!] Ill-composed configuration at (" << x << ", " << y << ")" << std::endl;
+                }
+            }
+        }
+    }
+
+    if (isWellComposed) {
+        std::cout << "Result: The image IS well-composed." << std::endl;
+    } else {
+        std::cout << "Result: The image IS NOT well-composed (" << badConfigs << " critical configurations found)." << std::endl;
+    }
+
+    return isWellComposed;
 }
 
 std::vector<ObjectType> getCleanObjects(const std::vector<ObjectType>& objects, 
@@ -82,13 +133,12 @@ std::vector<ObjectType> getCleanObjects(const std::vector<ObjectType>& objects,
 
     for (const auto& obj : objects) 
     {
-        // 1. Check size first (faster than iterating points)
         if (obj.pointSet().size() <= minSize) {
             removedNoise++;
             continue;
         }
 
-        // 2. Check if touches boundary
+        // Check if touches boundary
         bool touchesBoundary = false;
         for (auto p : obj.pointSet()) {
             if (p[0] == pMin[0] || p[0] == pMax[0] || 
@@ -129,7 +179,7 @@ Curve getBoundary(T & object)
         const DigitalSet& set = object.pointSet();
         SCell s = Surfaces<KSpace>::findABel(kSpace, set);
 
-        // // 2) Call Surfece::track2DBoundaryPoints to extract the boundary of the object (boundaryPoints)
+        // 2) Call Surfece::track2DBoundaryPoints to extract the boundary of the object (boundaryPoints)
         std::vector<SCell> boundarySurfels;
         SurfelAdjacency<2> sAdj(true);
         
@@ -225,11 +275,10 @@ void exportToCSV(const RiceFeatures& features, const std::string& filename)
 {
     std::ofstream file(filename);
     
-    // 1. Write the Header
+    // Write the Header
     file << "ID,PolyArea,PolyPerimeter,DigitalArea,DigitalPerimeter,Circularity\n";
 
-    // 2. Write the Data
-    // (We assume all vectors in 'features' are the same size because of your synchronization logic)
+    // Write the Data
     size_t count = features.polyAreas.size();
     
     for (size_t i = 0; i < count; ++i) {
@@ -272,9 +321,7 @@ RiceFeatures cleanOutliers(const RiceFeatures& input) {
     for (size_t i = 0; i < count; ++i) {
         double area = input.circularities[i];
         
-        // 2. Check if this specific grain is an outlier
         if (area >= minArea && area <= maxArea) {
-            // KEEP IT: Copy data to the clean struct
             clean.polyAreas.push_back(input.polyAreas[i]);
             clean.polyPerimeters.push_back(input.polyPerimeters[i]);
             clean.digitalAreas.push_back(input.digitalAreas[i]);
@@ -301,7 +348,7 @@ void classifyMixedRice(const std::vector<ObjectType>& objects)
 
     // (Values derived from boxplots)
     const double THRESHOLD_ROUND = 0.8; 
-    const double THRESHOLD_LONG  = 0.65; 
+    const double THRESHOLD_LONG  = 0.63; 
 
     // std::cout << "\n=== CLASSIFIED & CLEANED RESULTS ===" << std::endl;
     // std::cout << "ID | Area   | Circ. | Status" << std::endl;
@@ -333,11 +380,9 @@ void classifyMixedRice(const std::vector<ObjectType>& objects)
             // std::cout << index << "  | " << pArea << " | ----- | IGNORED (Outlier Size)" << std::endl;
             counts.ignored++;
             index++;
-            continue; // Skip this grain!
+            continue; // Skip 
         }
 
-        // --- E. CLASSIFICATION STEP ---
-        // We only reach here if the grain is "clean"
         double circ = (4.0 * M_PI * pArea) / (pPerim * pPerim);
         std::string type = "Unknown";
 
@@ -369,8 +414,9 @@ int main(int argc, char** argv)
     setlocale(LC_NUMERIC, "us_US"); //To prevent French local settings
 
     //typedef Object<DT8_4, DigitalSet> ObjectType; // Digital object with (8,4)-adjacency pair
-    // 1) read an image
+    // STEP 1
     GrayImage image = PGMReader<GrayImage>::importPGM ("../RiceGrains/Rice_camargue_seg_bin.pgm"); // Change based on desired image
+    checkWellComposed(image);
     std::vector<ObjectType> objects = getObjectsFromImage(image);
 
     std::vector<ObjectType> completeObjects = getCleanObjects(objects, image.domain());
@@ -405,17 +451,17 @@ int main(int argc, char** argv)
     Segmentation::SegmentComputerIterator seg_i = seg.begin();
 
     // DISPLAY STEP 4
-    aBoard << completeObjects[99];
-    aBoard << c;
-    for (seg_i = seg.begin(); seg_i != seg.end(); ++seg_i) {
-        // This holds the actual shape (ArithmeticalDSS) that supports "BoundingBox"
-        SegmentComputer::Primitive currentShape = seg_i->primitive();
+    // aBoard << completeObjects[99];
+    // aBoard << c;
+    // for (seg_i = seg.begin(); seg_i != seg.end(); ++seg_i) {
+    //     // This holds the actual shape (ArithmeticalDSS) that supports "BoundingBox"
+    //     SegmentComputer::Primitive currentShape = seg_i->primitive();
         
-        // Draw the Bounding Box using the Shape object
-        aBoard << SetMode(currentShape.className(), "BoundingBox")
-               << CustomStyle(currentShape.className() + "/BoundingBox", new CustomPen(Color::Red, Color::None, 2.0))
-               << currentShape;
-    }
+    //     // Draw the Bounding Box using the Shape object
+    //     aBoard << SetMode(currentShape.className(), "BoundingBox")
+    //            << CustomStyle(currentShape.className() + "/BoundingBox", new CustomPen(Color::Red, Color::None, 2.0))
+    //            << currentShape;
+    // }
 
     // STEP 5,6,7
     RiceFeatures features = analyzeRiceGrains(completeObjects);
@@ -445,7 +491,7 @@ int main(int argc, char** argv)
     // STEP 9
     classifyMixedRice(completeObjects); // With outliers present
 
-    GrayImage image_mixed = PGMReader<GrayImage>::importPGM ("../RiceGrainsMixed/Rice_mixed3_seg_bin.pgm"); // Change based on desired image
+    GrayImage image_mixed = PGMReader<GrayImage>::importPGM ("../RiceGrainsMixed/Rice_mixed2_seg_bin.pgm"); // Change based on desired image
     std::vector<ObjectType> objects_mixed = getObjectsFromImage(image_mixed);
     std::vector<ObjectType> cleanObjects_mixed = getCleanObjects(objects_mixed, image_mixed.domain());
     classifyMixedRice(cleanObjects_mixed); 
