@@ -25,6 +25,13 @@ struct RiceFeatures {
     std::vector<double> circularities;  // 4*pi*A / P^2
 };
 
+struct RiceCounts {
+    int basmati = 0;
+    int camargue = 0;
+    int japonais = 0;
+    int ignored = 0; // Track how many outliers we removed
+};
+
 typedef PointVector<2,int> Point;
 typedef std::vector<Point> Range;
 typedef Range::const_iterator ConstIterator;
@@ -33,6 +40,77 @@ typedef GreedySegmentation<SegmentComputer> Segmentation;
 
 typedef DigitalSetSelector< Domain, BIG_DS+HIGH_BEL_DS >::Type DigitalSet; // Digital set type
 typedef Object<DT4_8, DigitalSet> ObjectType; // Digital object with (4,8)-adjacency pair
+typedef ImageSelector<Domain, unsigned char >::Type GrayImage;
+
+std::vector<ObjectType> getObjectsFromImage(const GrayImage& image)
+{
+    if (image.domain().size() == 0) {
+        std::cerr << "\n[Error] Failed to load image or image is empty!" << std::endl;
+        return {};
+    }
+
+    // 2. Convert to Digital Set (Threshold 1-255)
+    Z2i::DigitalSet set2d(image.domain());
+    SetFromImage<Z2i::DigitalSet>::append<GrayImage>(set2d, image, 1, 255);
+
+    // 3. Create the Main Object (Topological Wrapper)
+    // dt4_8 = 4-connected foreground, 8-connected background
+    ObjectType obj(Z2i::dt4_8, set2d);
+
+    // 4. Extract Connected Components
+    std::vector<ObjectType> objects;
+    std::back_insert_iterator<std::vector<ObjectType>> inserter(objects);
+    
+    // This splits the set into distinct connected grains
+    obj.writeComponents(inserter);
+
+    std::cout << "Found " << objects.size() << " objects." << std::endl;
+
+    return objects;
+}
+
+std::vector<ObjectType> getCleanObjects(const std::vector<ObjectType>& objects, 
+                                        const Domain& domain, 
+                                        size_t minSize = 20)
+{
+    std::vector<ObjectType> cleanObjects;
+    Point pMin = domain.lowerBound();
+    Point pMax = domain.upperBound();
+
+    int removedBorder = 0;
+    int removedNoise = 0;
+
+    for (const auto& obj : objects) 
+    {
+        // 1. Check size first (faster than iterating points)
+        if (obj.pointSet().size() <= minSize) {
+            removedNoise++;
+            continue;
+        }
+
+        // 2. Check if touches boundary
+        bool touchesBoundary = false;
+        for (auto p : obj.pointSet()) {
+            if (p[0] == pMin[0] || p[0] == pMax[0] || 
+                p[1] == pMin[1] || p[1] == pMax[1]) {
+                touchesBoundary = true;
+                break; 
+            }
+        }
+
+        if (!touchesBoundary) {
+            cleanObjects.push_back(obj);
+        } else {
+            removedBorder++;
+        }
+    }
+
+    std::cout << "Cleaned Objects: Kept " << cleanObjects.size() 
+              << " (Removed " << removedBorder << " touching border, " 
+              << removedNoise << " noise)." << std::endl;
+
+    return cleanObjects;
+}
 
 template<class T>
 Curve getBoundary(T & object)
@@ -213,51 +291,89 @@ RiceFeatures cleanOutliers(const RiceFeatures& input) {
     return clean;
 }
 
+void classifyMixedRice(const std::vector<ObjectType>& objects)
+{
+    RiceCounts counts;
+
+    // (Values derived from boxplots)
+    const double MIN_AREA = 400.0;  
+    const double MAX_AREA = 3375.0;
+
+    // (Values derived from boxplots)
+    const double THRESHOLD_ROUND = 0.8; 
+    const double THRESHOLD_LONG  = 0.65; 
+
+    // std::cout << "\n=== CLASSIFIED & CLEANED RESULTS ===" << std::endl;
+    // std::cout << "ID | Area   | Circ. | Status" << std::endl;
+    // std::cout << "---|--------|-------|-------" << std::endl;
+
+    int index = 0;
+    for(const auto& obj : objects)
+    {
+        Z2i::Curve c = getBoundary(obj);
+        if(!c.isValid() || c.size() <= 2) { index++; continue; }
+
+        Range r; 
+        auto curvePoints = c.getPointsRange(); 
+        std::copy(curvePoints.begin(), curvePoints.end(), std::back_inserter(r));
+
+        SegmentComputer recognitionAlgorithm;
+        Segmentation theSegmentation(r.begin(), r.end(), recognitionAlgorithm);
+
+        std::vector<Point> polygonVertices;
+        for (auto it = theSegmentation.begin(); it != theSegmentation.end(); ++it) {
+            polygonVertices.push_back(*it->begin());
+        }
+        
+        double pArea = calculatePolygonArea(polygonVertices);
+        double pPerim = calculatePolygonPerimeter(polygonVertices);
+        if (pPerim <= 0) continue;
+
+        if (pArea < MIN_AREA || pArea > MAX_AREA) {
+            // std::cout << index << "  | " << pArea << " | ----- | IGNORED (Outlier Size)" << std::endl;
+            counts.ignored++;
+            index++;
+            continue; // Skip this grain!
+        }
+
+        // --- E. CLASSIFICATION STEP ---
+        // We only reach here if the grain is "clean"
+        double circ = (4.0 * M_PI * pArea) / (pPerim * pPerim);
+        std::string type = "Unknown";
+
+        if (circ >= THRESHOLD_ROUND) {
+            type = "Japonais";
+            counts.japonais++;
+        } else if (circ < THRESHOLD_ROUND && circ >= THRESHOLD_LONG) {
+            type = "Camargue";
+            counts.camargue++;
+        } else {
+            type = "Basmati";
+            counts.basmati++;
+        }
+
+        // std::cout << index << "  | " << pArea << " | " << std::fixed << std::setprecision(2) << circ << "  | " << type << std::endl;
+        index++;
+    }
+
+    std::cout << "\n--- SUMMARY ---" << std::endl;
+    std::cout << "Japonais: " << counts.japonais << std::endl;
+    std::cout << "Camargue: " << counts.camargue << std::endl;
+    std::cout << "Basmati:  " << counts.basmati << std::endl;
+    std::cout << "Ignored:  " << counts.ignored << " (Noise/Fused)" << std::endl;
+}
+
 int main(int argc, char** argv)
 {
     Board2D aBoard;
     setlocale(LC_NUMERIC, "us_US"); //To prevent French local settings
 
     //typedef Object<DT8_4, DigitalSet> ObjectType; // Digital object with (8,4)-adjacency pair
-    typedef ImageSelector<Domain, unsigned char >::Type Image; // type of image
     // 1) read an image
-    Image image = PGMReader<Image>::importPGM ("../RiceGrains/Rice_camargue_seg_bin.pgm"); // Change based on desired image
+    GrayImage image = PGMReader<GrayImage>::importPGM ("../RiceGrains/Rice_camargue_seg_bin.pgm"); // Change based on desired image
+    std::vector<ObjectType> objects = getObjectsFromImage(image);
 
-    // 2) Use SetFromImage::append() to convert the image to a "DigitalSet" of the proper size
-    Z2i::DigitalSet set2d (image.domain());
-    SetFromImage<Z2i::DigitalSet>::append<Image>(set2d, image, 1, 255);
-
-    // 3) Create a digital object from the "DigitalSet"
-    std::vector< ObjectType > objects; // All connected components are going to be stored in this vector
-    std::back_insert_iterator< std::vector< ObjectType > > inserter( objects ); // Iterator used to populated "objects".
-    ObjectType obj(Z2i::dt4_8, set2d);
-    
-    // 4) Use the method "writeComponents to obtain connected components with the proper adjacency pair
-    obj.writeComponents(inserter);
-    std::vector<ObjectType> completeObjects;
-    Domain domain = image.domain();
-    Point pMin = domain.lowerBound();
-    Point pMax = domain.upperBound();
-
-    for (const auto& obj : objects) {
-        bool touchesBoundary = false;
-        
-        // Iterate through all points in the digital set of this component
-        for (auto it = obj.pointSet().begin(); it != obj.pointSet().end(); ++it) {
-            Point p = *it;
-            
-            // Check if the point is on the edge of the image frame
-            if (p[0] == pMin[0] || p[0] == pMax[0] || 
-                p[1] == pMin[1] || p[1] == pMax[1]) {
-                touchesBoundary = true;
-                break; // No need to check other points for this grain
-            }
-        }
-
-        if (!touchesBoundary && obj.pointSet().size() > 20) { 
-            completeObjects.push_back(obj);
-        }
-    }
+    std::vector<ObjectType> completeObjects = getCleanObjects(objects, image.domain());
 
     // STEP 2
 
@@ -322,10 +438,17 @@ int main(int argc, char** argv)
     computeStats(features.circularities, "Circularity");
 
     // STEP 8
-    // exportToCSV(features, "basmati.csv"); // Mutliple images can be analyzed by changing the input image path
+    // exportToCSV(features, "csv/basmati.csv"); // Mutliple images can be analyzed by changing the input image path
     RiceFeatures cleanFeatures = cleanOutliers(features);
-    exportToCSV(cleanFeatures, "camargue_cleaned.csv");
+    // exportToCSV(cleanFeatures, "csv/camargue_cleaned.csv");
 
+    // STEP 9
+    classifyMixedRice(completeObjects); // With outliers present
+
+    GrayImage image_mixed = PGMReader<GrayImage>::importPGM ("../RiceGrainsMixed/Rice_mixed3_seg_bin.pgm"); // Change based on desired image
+    std::vector<ObjectType> objects_mixed = getObjectsFromImage(image_mixed);
+    std::vector<ObjectType> cleanObjects_mixed = getCleanObjects(objects_mixed, image_mixed.domain());
+    classifyMixedRice(cleanObjects_mixed); // On a different mixed image
 
     aBoard.saveSVG("./output.svg", 600, 600);
 
