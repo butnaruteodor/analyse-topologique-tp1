@@ -17,6 +17,14 @@ using namespace std;
 using namespace DGtal;
 using namespace Z2i;
 
+struct RiceFeatures {
+    std::vector<double> polyAreas;      // Polygon Area (convergent)
+    std::vector<double> polyPerimeters; // Polygon Perimeter (convergent)
+    std::vector<double> digitalAreas;   // Pixel count
+    std::vector<double> digitalPerimeters; // 1-cells count
+    std::vector<double> circularities;  // 4*pi*A / P^2
+};
+
 typedef PointVector<2,int> Point;
 typedef std::vector<Point> Range;
 typedef Range::const_iterator ConstIterator;
@@ -70,40 +78,139 @@ double calculatePolygonArea(const std::vector<Point>& vertices) {
     return std::abs(area) / 2.0;
 }
 
-void getAreaDistribution(std::vector<ObjectType>& objects) 
+double calculatePolygonPerimeter(const std::vector<Point>& vertices) {
+    double perimeter = 0.0;
+    int n = vertices.size();
+    for (int i = 0; i < n; ++i) {
+        Point p1 = vertices[i];
+        Point p2 = vertices[(i + 1) % n];
+        double dx = p1[0] - p2[0];
+        double dy = p1[1] - p2[1];
+        perimeter += std::sqrt(dx * dx + dy * dy);
+    }
+    return perimeter;
+}
+
+RiceFeatures analyzeRiceGrains(const std::vector<ObjectType>& completeObjects)
 {
-    std::cout << "Analyzing " << objects.size() << " objects..." << std::endl;
-    std::vector<double> areas;
-    // Z2i::Curve c = getBoundary(objects[0]);
-    for(auto& obj : objects)
+    // These are guaranteed to stay in sync
+    RiceFeatures features;
+
+    std::cout << "Starting analysis on " << completeObjects.size() << " objects..." << std::endl;
+
+    for (const auto& obj : completeObjects)
     {
         Z2i::Curve c = getBoundary(obj);
-        Range r; 
-        auto curvePoints = c.getPointsRange(); 
-        std::copy(curvePoints.begin(), curvePoints.end(), std::back_inserter(r));
-        SegmentComputer recognitionAlgorithm;
-        Segmentation theSegmentation(r.begin(), r.end(), recognitionAlgorithm);
-            
-        Segmentation::SegmentComputerIterator beg = theSegmentation.begin();
-        Segmentation::SegmentComputerIterator end = theSegmentation.end();
 
-        std::vector<Point> polygonVertices;
-        for ( ; beg != end; ++beg) {
-            Point vertex = *beg->begin(); 
-            polygonVertices.push_back(vertex);
-        }
-
-        // Calculate Area
-        double polyArea = calculatePolygonArea(polygonVertices);
-        if (polyArea > 0.0)
+        if (c.isValid() && c.size() > 2)
         {
-            areas.push_back(polyArea);
+            std::vector<Point> polygon;
+            double currentArea = 0.0; 
+            double digitalArea = (double)obj.pointSet().size();
+            double currentPerim = 0.0;
+            double digitalPerimeter = (double)c.size();
+            
+            Range r; 
+            auto curvePoints = c.getPointsRange(); 
+            std::copy(curvePoints.begin(), curvePoints.end(), std::back_inserter(r));
+
+            SegmentComputer recognitionAlgorithm;
+            Segmentation theSegmentation(r.begin(), r.end(), recognitionAlgorithm);
+
+            std::vector<Point> polygonVertices;
+            for (auto it = theSegmentation.begin(); it != theSegmentation.end(); ++it) {
+                polygonVertices.push_back(*it->begin());
+            }
+            
+            currentArea = calculatePolygonArea(polygonVertices);
+            currentPerim = calculatePolygonPerimeter(polygonVertices);
+
+            if (currentPerim > 0) {
+                 features.polyAreas.push_back(currentArea);
+                 features.polyPerimeters.push_back(currentPerim);
+                 
+                 features.digitalAreas.push_back(digitalArea);
+                 features.digitalPerimeters.push_back(digitalPerimeter);
+                 
+                 // Calculate Circularity
+                 double circ = (4.0 * M_PI * currentArea) / (currentPerim * currentPerim);
+                 features.circularities.push_back(circ);
+            }
         }
     }
-    auto mean = std::accumulate(areas.begin(), areas.end(), 0.0) / areas.size(); 
-    double sq_sum = std::inner_product(areas.begin(), areas.end(), areas.begin(), 0.0);
-    double stdev = std::sqrt(sq_sum / areas.size() - mean * mean);
-    cout << mean << " "<< " "<<stdev;
+
+    std::cout << "Successfully analyzed " << features.polyAreas.size() << " valid grains." << std::endl;
+    return features;
+}
+
+void exportToCSV(const RiceFeatures& features, const std::string& filename)
+{
+    std::ofstream file(filename);
+    
+    // 1. Write the Header
+    file << "ID,PolyArea,PolyPerimeter,DigitalArea,DigitalPerimeter,Circularity\n";
+
+    // 2. Write the Data
+    // (We assume all vectors in 'features' are the same size because of your synchronization logic)
+    size_t count = features.polyAreas.size();
+    
+    for (size_t i = 0; i < count; ++i) {
+        file << i << "," 
+             << features.polyAreas[i] << "," 
+             << features.polyPerimeters[i] << "," 
+             << features.digitalAreas[i] << "," 
+             << features.digitalPerimeters[i] << "," 
+             << features.circularities[i] << "\n";
+    }
+
+    file.close();
+    std::cout << "Data successfully exported to " << filename << std::endl;
+}
+
+void getIQR(std::vector<double> data, double& lowThreshold, double& highThreshold) {
+    if (data.empty()) return;
+    
+    // Sort a copy to find percentiles
+    std::sort(data.begin(), data.end());
+    
+    size_t n = data.size();
+    double q1 = data[n / 4];
+    double q3 = data[n * 3 / 4];
+    double iqr = q3 - q1;
+    
+    lowThreshold = q1 - 1.5 * iqr;
+    highThreshold = q3 + 1.5 * iqr;
+}
+
+RiceFeatures cleanOutliers(const RiceFeatures& input) {
+    RiceFeatures clean;
+    
+    double minArea, maxArea;
+    getIQR(input.circularities, minArea, maxArea);
+    
+    size_t count = input.circularities.size();
+    int removed = 0;
+
+    for (size_t i = 0; i < count; ++i) {
+        double area = input.circularities[i];
+        
+        // 2. Check if this specific grain is an outlier
+        if (area >= minArea && area <= maxArea) {
+            // KEEP IT: Copy data to the clean struct
+            clean.polyAreas.push_back(input.polyAreas[i]);
+            clean.polyPerimeters.push_back(input.polyPerimeters[i]);
+            clean.digitalAreas.push_back(input.digitalAreas[i]);
+            clean.digitalPerimeters.push_back(input.digitalPerimeters[i]);
+            clean.circularities.push_back(input.circularities[i]);
+        } else {
+            removed++;
+        }
+    }
+    
+    std::cout << "Outlier Removal: Kept " << clean.polyAreas.size() 
+              << " grains. Removed " << removed << " outliers." << std::endl;
+              
+    return clean;
 }
 
 int main(int argc, char** argv)
@@ -114,7 +221,7 @@ int main(int argc, char** argv)
     //typedef Object<DT8_4, DigitalSet> ObjectType; // Digital object with (8,4)-adjacency pair
     typedef ImageSelector<Domain, unsigned char >::Type Image; // type of image
     // 1) read an image
-    Image image = PGMReader<Image>::importPGM ("../RiceGrains/Rice_japonais_seg_bin.pgm");
+    Image image = PGMReader<Image>::importPGM ("../RiceGrains/Rice_camargue_seg_bin.pgm"); // Change based on desired image
 
     // 2) Use SetFromImage::append() to convert the image to a "DigitalSet" of the proper size
     Z2i::DigitalSet set2d (image.domain());
@@ -147,7 +254,7 @@ int main(int argc, char** argv)
             }
         }
 
-        if (!touchesBoundary) {
+        if (!touchesBoundary && obj.pointSet().size() > 20) { 
             completeObjects.push_back(obj);
         }
     }
@@ -164,7 +271,7 @@ int main(int argc, char** argv)
 
     // STEP 3
 
-    // Z2i::Curve c = getBoundary(completeObjects[0]);
+    Z2i::Curve c = getBoundary(completeObjects[99]);
 
     // DISPLAY STEP 3
 
@@ -173,57 +280,54 @@ int main(int argc, char** argv)
 
     // complete the function "getBoundary" written above and add/modify your codes
     // STEP 4
-    // Range r; 
-    // auto curvePoints = c.getPointsRange(); 
-    // std::copy(curvePoints.begin(), curvePoints.end(), std::back_inserter(r));
-    // SegmentComputer recognitionAlgorithm;
-    // Segmentation theSegmentation(r.begin(), r.end(), recognitionAlgorithm);
+    Range r; 
+    auto curvePoints = c.getPointsRange(); 
+    std::copy(curvePoints.begin(), curvePoints.end(), std::back_inserter(r));
+    SegmentComputer recognitionAlgorithm;
+    Segmentation seg(r.begin(), r.end(), recognitionAlgorithm);
         
-    // Segmentation::SegmentComputerIterator i = theSegmentation.begin();
-    // Segmentation::SegmentComputerIterator end = theSegmentation.end();
+    Segmentation::SegmentComputerIterator seg_i = seg.begin();
 
     // DISPLAY STEP 4
-    // aBoard << completeObjects[0];
-    // aBoard << c;
-    // for ( ; i != end; ++i) {
-    //     // This holds the actual shape (ArithmeticalDSS) that supports "BoundingBox"
-    //     SegmentComputer::Primitive currentShape = i->primitive();
+    aBoard << completeObjects[99];
+    aBoard << c;
+    for (seg_i = seg.begin(); seg_i != seg.end(); ++seg_i) {
+        // This holds the actual shape (ArithmeticalDSS) that supports "BoundingBox"
+        SegmentComputer::Primitive currentShape = seg_i->primitive();
         
-    //     // Draw the Bounding Box using the Shape object
-    //     aBoard << SetMode(currentShape.className(), "BoundingBox")
-    //            << CustomStyle(currentShape.className() + "/BoundingBox", new CustomPen(Color::Red, Color::None, 2.0))
-    //            << currentShape;
-    // }
+        // Draw the Bounding Box using the Shape object
+        aBoard << SetMode(currentShape.className(), "BoundingBox")
+               << CustomStyle(currentShape.className() + "/BoundingBox", new CustomPen(Color::Red, Color::None, 2.0))
+               << currentShape;
+    }
 
-    // STEP 5
-    // unsigned int digitalArea = completeObjects[0].pointSet().size();
-    // std::cout << "Digital Area (Pixel Count): " << digitalArea << std::endl;
+    // STEP 5,6,7
+    RiceFeatures features = analyzeRiceGrains(completeObjects);
 
-    // std::vector<Point> polygonVertices;
-    // for ( ; i != end; ++i) {
-    //     Point vertex = *i->begin(); 
-    //     polygonVertices.push_back(vertex);
-    // }
+    auto computeStats = [](const std::vector<double>& data, const std::string& name) {
+        if (data.empty()) {
+            std::cout << name << ": No valid data." << std::endl;
+            return;
+        }
+        double mean = std::accumulate(data.begin(), data.end(), 0.0) / data.size();
+        double sq_sum = std::inner_product(data.begin(), data.end(), data.begin(), 0.0);
+        double stdev = std::sqrt(sq_sum / data.size() - mean * mean);
+        std::cout << name << " (Mean/Std): " << mean << " / " << stdev << std::endl;
+    };
 
-    // // Calculate Area
-    // double polyArea = calculatePolygonArea(polygonVertices);
-    // std::cout << "Polygon Area (Shoelace):    " << polyArea << std::endl;
+    computeStats(features.digitalAreas, "Digital Area");
+    computeStats(features.polyAreas, "Area");
+    computeStats(features.digitalPerimeters, "Digital Perimeter");
+    computeStats(features.polyPerimeters, "Perimeter");
+    computeStats(features.circularities, "Circularity");
 
-    getAreaDistribution(completeObjects);
-    // DISPLAY STEP 5
+    // STEP 8
+    // exportToCSV(features, "basmati.csv"); // Mutliple images can be analyzed by changing the input image path
+    RiceFeatures cleanFeatures = cleanOutliers(features);
+    exportToCSV(cleanFeatures, "camargue_cleaned.csv");
 
-    // aBoard << completeObjects[0];
-    // aBoard << c;
-    // for ( ; i != end; ++i) {
-    //     // This holds the actual shape (ArithmeticalDSS) that supports "BoundingBox"
-    //     SegmentComputer::Primitive currentShape = i->primitive();
-        
-    //     // Draw the Bounding Box using the Shape object
-    //     aBoard << currentShape;
-        
-    // }
 
-    aBoard.saveCairo("./output.pdf", Board2D::CairoPDF);
+    aBoard.saveSVG("./output.svg", 600, 600);
 
     return 0;
 }
