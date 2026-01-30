@@ -448,7 +448,7 @@ int main(int argc, char** argv)
     GrayImage image_mixed = PGMReader<GrayImage>::importPGM ("../RiceGrainsMixed/Rice_mixed3_seg_bin.pgm"); // Change based on desired image
     std::vector<ObjectType> objects_mixed = getObjectsFromImage(image_mixed);
     std::vector<ObjectType> cleanObjects_mixed = getCleanObjects(objects_mixed, image_mixed.domain());
-    classifyMixedRice(cleanObjects_mixed); // On a different mixed image
+    classifyMixedRice(cleanObjects_mixed); 
 
     aBoard.saveSVG("./output.svg", 600, 600);
 
